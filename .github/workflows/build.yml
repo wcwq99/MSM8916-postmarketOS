@@ -192,7 +192,7 @@ jobs:
         # mirror each other). The script writes rootfs files under sudo
         # because pmbootstrap creates the chroot root-owned.
         run: |
-          scripts/post-install-customize.sh "$PMB_WORK/chroot_rootfs_zhihe-generic"
+          bash scripts/post-install-customize.sh "$PMB_WORK/chroot_rootfs_zhihe-generic"
           # Export the prepared image. pmbootstrap export with no argument
           # writes symlinks into CWD ($GITHUB_WORKSPACE), not $PMB_EXPORT --
           # pass the path explicitly so the Collect step's find "$PMB_EXPORT"

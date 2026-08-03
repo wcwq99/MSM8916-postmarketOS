@@ -238,7 +238,7 @@ build_image() {
 	# Apply CN mirrors + USB NCM/RNDIS gadget + UFI003 default DTB before
 	# exporting, mirroring .github/workflows/build.yml. Shared script keeps
 	# the two paths in sync (AGENTS.md requires it).
-	"$repo_root/scripts/post-install-customize.sh" \
+	bash "$repo_root/scripts/post-install-customize.sh" \
 		"$PMB_WORK/chroot_rootfs_zhihe-generic"
 	# Drop symlinks left by an earlier run: the state directory is reused, so a
 	# stale-but-resolvable link would be collected as if it were fresh output.

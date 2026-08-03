@@ -103,6 +103,21 @@ jobs:
       - name: Add the 19-board kernel overlay
         run: scripts/prepare-pmaports.sh "$PMB_APORTS"
 
+      - name: Restore pmbootstrap ccache
+        # Cache only the C compiler cache, never chroot_native/ or rootfs
+        # chroots (they hold bind mounts and binfmt state that break on
+        # restore). ccache is keyed on the pmbootstrap pin + work version,
+        # so a dependency bump invalidates cleanly. With a warm cache the
+        # 35-55 min kernel build drops to ~5-10 min.
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.PMB_WORK }}/ccache
+            ${{ env.PMB_WORK }}/ccache_aarch64
+          key: pmbootstrap-ccache-${{ env.PMBOOTSTRAP_REV }}-${{ env.PMAPORTS_REV }}
+          restore-keys: |
+            pmbootstrap-ccache-${{ env.PMBOOTSTRAP_REV }}-
+
       - name: Configure pmbootstrap
         run: |
           mkdir -p "$PMB_WORK"

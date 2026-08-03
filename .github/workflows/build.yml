@@ -158,17 +158,21 @@ jobs:
           fi
 
       - name: Switch to CN mirrors and install USB NCM+RNDIS gadget
+        # All writes target $ROOTFS, which pmbootstrap created under sudo, so
+        # every file there is root-owned. Use sudo tee / sudo install for all
+        # writes; plain "cat >" fails with "Permission denied" on the runner
+        # user.
         run: |
           ROOTFS="$PMB_WORK/chroot_rootfs_zhihe-generic"
           test -d "$ROOTFS" || { echo "rootfs chroot missing: $ROOTFS"; exit 1; }
 
           # 1) Replace apk repositories with TUNA mirrors (Alpine edge + pmOS)
-          cat > "$ROOTFS/etc/apk/repositories" <<'REPOS'
+          sudo tee "$ROOTFS/etc/apk/repositories" > /dev/null <<'REPOS'
           https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/main
           https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/community
           https://mirrors.tuna.tsinghua.edu.cn/postmarketOS/master
           REPOS
-          sed -i 's/^          //' "$ROOTFS/etc/apk/repositories"
+          sudo sed -i 's/^          //' "$ROOTFS/etc/apk/repositories"
 
           # 2) Networking deps (dnsmasq, iptables, iproute2) are installed via
           #    extra_packages above during pmbootstrap install, so no extra apk
@@ -178,7 +182,7 @@ jobs:
           #    Pattern verified in kinsamanka/OpenStick-Builder setup_ncm_gadget.sh,
           #    extended here to expose both ncm.1 and rndis.0 functions so the host
           #    can use whichever the OS prefers (Win/macOS -> RNDIS, Linux -> NCM).
-          cat > "$ROOTFS/usr/local/bin/setup_usb_gadget.sh" <<'GADGET'
+          sudo tee "$ROOTFS/usr/local/bin/setup_usb_gadget.sh" > /dev/null <<'GADGET'
           #!/bin/sh -e
           CONFIGFS=/sys/kernel/config/usb_gadget
           NAME=openstick
@@ -208,11 +212,11 @@ jobs:
           ln -sf "$DIR/configs/c.1" "$DIR/os_desc"
           echo "$(ls /sys/class/udc | head -1)" > "$DIR/UDC"
           GADGET
-          chmod +x "$ROOTFS/usr/local/bin/setup_usb_gadget.sh"
+          sudo chmod +x "$ROOTFS/usr/local/bin/setup_usb_gadget.sh"
 
           # 4) OpenRC service that brings the gadget up and assigns IPv4+IPv6.
           #    Device side: 10.0.0.1/24 + fc00::1/64; host gets .2/fc00::2 via DHCP.
-          cat > "$ROOTFS/etc/init.d/usb-gadget" <<'SVC'
+          sudo tee "$ROOTFS/etc/init.d/usb-gadget" > /dev/null <<'SVC'
           #!/sbin/openrc-run
           description="USB NCM+RNDIS gadget networking"
           depend() { after modules localmount; need dev-settle; }
@@ -239,26 +243,26 @@ jobs:
           }
           stop() { pkill dnsmasq 2>/dev/null || true; eend 0; }
           SVC
-          chmod +x "$ROOTFS/etc/init.d/usb-gadget"
+          sudo chmod +x "$ROOTFS/etc/init.d/usb-gadget"
 
           # 5) udev: fire the gadget setup as soon as the UDC appears at boot
-          mkdir -p "$ROOTFS/etc/udev/rules.d"
-          cat > "$ROOTFS/etc/udev/rules.d/10-udc.rules" <<'UDEV'
+          sudo mkdir -p "$ROOTFS/etc/udev/rules.d"
+          sudo tee "$ROOTFS/etc/udev/rules.d/10-udc.rules" > /dev/null <<'UDEV'
           ACTION=="add", SUBSYSTEM=="udc", RUN+="/sbin/modprobe libcomposite", RUN+="/usr/local/bin/setup_usb_gadget.sh"
           SUBSYSTEM=="net", ACTION=="add|change|move", ENV{DEVTYPE}=="gadget", ENV{NM_UNMANAGED}="0"
           UDEV
 
           # 6) Enable service at boot (symlink equivalent of rc-update add) + forwarding
-          mkdir -p "$ROOTFS/etc/runlevels/default"
-          ln -sf /etc/init.d/usb-gadget "$ROOTFS/etc/runlevels/default/usb-gadget"
-          cat >> "$ROOTFS/etc/sysctl.conf" <<'SYSCTL'
+          sudo mkdir -p "$ROOTFS/etc/runlevels/default"
+          sudo ln -sf /etc/init.d/usb-gadget "$ROOTFS/etc/runlevels/default/usb-gadget"
+          sudo tee -a "$ROOTFS/etc/sysctl.conf" > /dev/null <<'SYSCTL'
           net.ipv4.ip_forward=1
           net.ipv6.conf.all.forwarding=1
           SYSCTL
 
           # 7) Belt-and-suspenders: flip chroot copy of extlinux to UFI003 too
           if [ -f "$ROOTFS/boot/extlinux/extlinux.conf" ]; then
-            sed -i 's#^[[:space:]]*fdt .*#\tfdt /dtbs/qcom/msm8916-thwc-ufi003.dtb#' \
+            sudo sed -i 's#^[[:space:]]*fdt .*#\tfdt /dtbs/qcom/msm8916-thwc-ufi003.dtb#' \
               "$ROOTFS/boot/extlinux/extlinux.conf"
           fi
 

@@ -79,7 +79,7 @@ debugfs_run 'stat /dtbs/qcom'
 # template. The root filesystem label is stable across split-image builds.
 cat > "$work_dir/extlinux.conf" <<'EOF'
 linux /vmlinuz
-fdt /dtbs/qcom/msm8916-thwc-ufi001c.dtb
+fdt /dtbs/qcom/msm8916-thwc-ufi003.dtb
 append earlycon root=LABEL=pmOS_root console=ttyMSM0,115200 no_framebuffer=true rw rootwait
 EOF
 
@@ -119,8 +119,8 @@ debugfs_run "dump /extlinux/extlinux.conf $work_dir/verify-extlinux.conf"
 	|| fail "extlinux.conf must contain exactly one append directive"
 grep -Fq 'linux /vmlinuz' "$work_dir/verify-extlinux.conf" \
 	|| fail "extlinux.conf does not select /vmlinuz"
-grep -Fq 'fdt /dtbs/qcom/msm8916-thwc-ufi001c.dtb' "$work_dir/verify-extlinux.conf" \
-	|| fail "extlinux.conf does not select the default UFI001C DTB"
+grep -Fq 'fdt /dtbs/qcom/msm8916-thwc-ufi003.dtb' "$work_dir/verify-extlinux.conf" \
+	|| fail "extlinux.conf does not select the default UFI003 DTB"
 grep -Fq 'root=LABEL=pmOS_root' "$work_dir/verify-extlinux.conf" \
 	|| fail "extlinux.conf does not select the split root filesystem label"
 debugfs_run 'stat /boards.conf'

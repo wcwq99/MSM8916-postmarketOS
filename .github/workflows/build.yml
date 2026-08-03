@@ -15,9 +15,7 @@ env:
 
 jobs:
   build:
-    # ubuntu-22.04 ships qemu-user-static 6.2, which crashes the aarch64 Go
-    # binary of postmarketos-mkinitfs under binfmt emulation. 24.04 ships 8.2.
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     # Stay below the 6h hard limit so a hang fails the job while the failure
     # diagnostics steps can still run.
     timeout-minutes: 180
@@ -89,7 +87,7 @@ jobs:
           build_pkgs_on_install = True
           ccache_size = 5G
           device = zhihe-generic
-          extra_packages = soc-qcom-msm8916-rproc,qmi-utils,qrtr,modemmanager,iw,wpa_supplicant,wireless-regdb
+          extra_packages = soc-qcom-msm8916-rproc,qmi-utils,qrtr,modemmanager,iw,wpa_supplicant,wireless-regdb,dnsmasq,iptables,iproute2
           hostname = msm8916-pmos
           is_default_channel = False
           jobs = 4
@@ -129,6 +127,113 @@ jobs:
             tail -n 500 "$PMB_WORK/log.txt" || true
             exit 1
           fi
+
+      - name: Switch to CN mirrors and install USB NCM+RNDIS gadget
+        run: |
+          ROOTFS="$PMB_WORK/chroot_rootfs_zhihe-generic"
+          test -d "$ROOTFS" || { echo "rootfs chroot missing: $ROOTFS"; exit 1; }
+
+          # 1) Replace apk repositories with TUNA mirrors (Alpine edge + pmOS)
+          cat > "$ROOTFS/etc/apk/repositories" <<'REPOS'
+          https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/main
+          https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/community
+          https://mirrors.tuna.tsinghua.edu.cn/postmarketOS/master
+          REPOS
+          sed -i 's/^          //' "$ROOTFS/etc/apk/repositories"
+
+          # 2) Networking deps (dnsmasq, iptables, iproute2) are installed via
+          #    extra_packages above during pmbootstrap install, so no extra apk
+          #    call here that could desync the chroot state.
+
+          # 3) Gadget setup script: builds a composite NCM+RNDIS gadget via configfs.
+          #    Pattern verified in kinsamanka/OpenStick-Builder setup_ncm_gadget.sh,
+          #    extended here to expose both ncm.1 and rndis.0 functions so the host
+          #    can use whichever the OS prefers (Win/macOS -> RNDIS, Linux -> NCM).
+          cat > "$ROOTFS/usr/local/bin/setup_usb_gadget.sh" <<'GADGET'
+          #!/bin/sh -e
+          CONFIGFS=/sys/kernel/config/usb_gadget
+          NAME=openstick
+          DIR=$CONFIGFS/$NAME
+          [ -d "$CONFIGFS" ] || { echo "configfs missing"; exit 0; }
+          [ -d "$DIR" ] && exit 0
+          mkdir -p "$DIR/functions/ncm.1" "$DIR/functions/rndis.0"
+          echo 0x0200  > "$DIR/bcdUSB"
+          echo 0x1d6b  > "$DIR/idVendor"   # Linux Foundation
+          echo 0x0104  > "$DIR/idProduct"  # Multifunction Composite Gadget
+          echo 0x40    > "$DIR/bMaxPacketSize0"
+          mkdir -p "$DIR/strings/0x409"
+          echo "4G LTE Dongle" > "$DIR/strings/0x409/product"
+          echo "Openstick"    > "$DIR/strings/0x409/manufacturer"
+          echo "0123456789"   > "$DIR/strings/0x409/serialnumber"
+          # RNDIS uses a different interface class so Windows auto-binds usbnet/rndis
+          echo 0xef > "$DIR/functions/rndis.0/bInterfaceClass"
+          mkdir -p "$DIR/configs/c.1"
+          echo 0x80 > "$DIR/configs/c.1/bmAttributes"
+          echo 250  > "$DIR/configs/c.1/MaxPower"
+          ln -sf "$DIR/functions/ncm.1"    "$DIR/configs/c.1"
+          ln -sf "$DIR/functions/rndis.0" "$DIR/configs/c.1"
+          # OS descriptors so Windows loads RNDIS drivers automatically
+          echo "MSFT100" > "$DIR/os_desc/qw_sign"
+          echo 0xbc     > "$DIR/os_desc/b_vendor_code"
+          echo 1        > "$DIR/os_desc/use"
+          ln -sf "$DIR/configs/c.1" "$DIR/os_desc"
+          echo "$(ls /sys/class/udc | head -1)" > "$DIR/UDC"
+          GADGET
+          chmod +x "$ROOTFS/usr/local/bin/setup_usb_gadget.sh"
+
+          # 4) OpenRC service that brings the gadget up and assigns IPv4+IPv6.
+          #    Device side: 10.0.0.1/24 + fc00::1/64; host gets .2/fc00::2 via DHCP.
+          cat > "$ROOTFS/etc/init.d/usb-gadget" <<'SVC'
+          #!/sbin/openrc-run
+          description="USB NCM+RNDIS gadget networking"
+          depend() { after modules localmount; need dev-settle; }
+          start() {
+            ebegin "Setting up USB gadget"
+            modprobe libcomposite 2>/dev/null || true
+            /usr/local/bin/setup_usb_gadget.sh
+            # Wait for the usb0 interface to appear
+            for i in $(seq 1 30); do
+              ip link show usb0 >/dev/null 2>&1 && break
+              sleep 1
+            done
+            ip link set usb0 up
+            ip addr add 10.0.0.1/24 dev usb0 2>/dev/null || true
+            ip -6 addr add fc00::1/64 dev usb0 2>/dev/null || true
+            # DHCPv4 + DHCPv6 via dnsmasq on the USB link
+            pkill dnsmasq 2>/dev/null || true
+            dnsmasq --interface=usb0 --bind-interfaces --no-resolv \
+              --dhcp-range=10.0.0.2,10.0.0.6,255.255.255.0,12h \
+              --dhcp-range=fc00::2,fc00::6,64,12h \
+              --dhcp-option=option:router,10.0.0.1 \
+              --dhcp-option=option:dns-server,10.0.0.1,223.5.5.5,2400:3200::1
+            eend 0
+          }
+          stop() { pkill dnsmasq 2>/dev/null || true; eend 0; }
+          SVC
+          chmod +x "$ROOTFS/etc/init.d/usb-gadget"
+
+          # 5) udev: fire the gadget setup as soon as the UDC appears at boot
+          mkdir -p "$ROOTFS/etc/udev/rules.d"
+          cat > "$ROOTFS/etc/udev/rules.d/10-udc.rules" <<'UDEV'
+          ACTION=="add", SUBSYSTEM=="udc", RUN+="/sbin/modprobe libcomposite", RUN+="/usr/local/bin/setup_usb_gadget.sh"
+          SUBSYSTEM=="net", ACTION=="add|change|move", ENV{DEVTYPE}=="gadget", ENV{NM_UNMANAGED}="0"
+          UDEV
+
+          # 6) Enable service at boot (symlink equivalent of rc-update add) + forwarding
+          mkdir -p "$ROOTFS/etc/runlevels/default"
+          ln -sf /etc/init.d/usb-gadget "$ROOTFS/etc/runlevels/default/usb-gadget"
+          cat >> "$ROOTFS/etc/sysctl.conf" <<'SYSCTL'
+          net.ipv4.ip_forward=1
+          net.ipv6.conf.all.forwarding=1
+          SYSCTL
+
+          # 7) Belt-and-suspenders: flip chroot copy of extlinux to UFI003 too
+          if [ -f "$ROOTFS/boot/extlinux/extlinux.conf" ]; then
+            sed -i 's#^[[:space:]]*fdt .*#\tfdt /dtbs/qcom/msm8916-thwc-ufi003.dtb#' \
+              "$ROOTFS/boot/extlinux/extlinux.conf"
+          fi
+
+          # Finally export the prepared image
           pmbootstrap export
 
       - name: Upload pmbootstrap failure log

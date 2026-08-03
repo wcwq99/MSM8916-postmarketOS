@@ -15,7 +15,7 @@ env:
 
 jobs:
   build:
-    runs-on: namespace-profile-dgfkjdzv
+    runs-on: ubuntu-24.04
     # Stay below the 6h hard limit so a hang fails the job while the failure
     # diagnostics steps can still run.
     timeout-minutes: 180
@@ -62,9 +62,10 @@ jobs:
           test "$(grep -c '.dtb$' config/openstick-dtbs.list)" -eq 14
 
       - name: Ensure loop devices are available
-        # Namespace's managed Ubuntu image occasionally ships without /dev/loop*
-        # nodes materialized, which makes pmbootstrap's losetup fail with
-        # "device node /dev/loop0 is lost". Load the module and create the nodes.
+        # ubuntu-24.04 ships /dev/loop* ready to use, but pmbootstrap's losetup
+        # has failed before on Namespace runners with "Operation not permitted".
+        # Keep this as a defensive check: load the module, materialize any
+        # missing minor nodes, and fail loudly if losetup still cannot attach.
         run: |
           sudo modprobe loop 2>/dev/null || true
           for i in $(seq 0 7); do
@@ -72,6 +73,19 @@ jobs:
           done
           losetup -f || true
           echo "loop devices:"; losetup -l
+          # Prove losetup can actually attach, not just that nodes exist. This
+          # catches the Namespace-style "node exists but ioctl denied" failure
+          # before we burn 30+ minutes on the kernel build.
+          t=$(mktemp)
+          truncate -s 1M "$t"
+          loop=$(losetup -f --show -P "$t") || {
+            echo "ERROR: losetup cannot attach a test file."
+            echo "This runner is unsuitable for pmbootstrap install."
+            rm -f "$t"
+            exit 1
+          }
+          losetup -d "$loop"
+          rm -f "$t"
 
       - name: Clone pinned pmbootstrap and pmaports
         run: |

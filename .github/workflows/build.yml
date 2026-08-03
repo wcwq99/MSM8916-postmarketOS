@@ -15,7 +15,7 @@ env:
 
 jobs:
   build:
-    runs-on: namespace-profile-default
+    runs-on: namespace-profile-dgfkjdzv
     # Stay below the 6h hard limit so a hang fails the job while the failure
     # diagnostics steps can still run.
     timeout-minutes: 180

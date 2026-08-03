@@ -17,6 +17,13 @@ fail() {
 	debugfs -R 'ls -l /extlinux' "$boot_image" >&2 || true
 	echo "Boot image /dtbs/qcom directory:" >&2
 	debugfs -R 'ls -l /dtbs/qcom' "$boot_image" >&2 || true
+	# Dump the actual extlinux.conf content so a mismatch is visible instead
+	# of just "must contain exactly one linux directive". Also show what we
+	# wrote, to tell a write failure from a read failure.
+	echo "Host-side extlinux.conf (what we wrote):" >&2
+	cat "$work_dir/extlinux.conf" >&2 || true
+	echo "Image-side extlinux.conf (what verify read back):" >&2
+	cat "$work_dir/verify-extlinux.conf" >&2 || true
 	exit 1
 }
 

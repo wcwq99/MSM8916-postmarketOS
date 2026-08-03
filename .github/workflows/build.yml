@@ -66,6 +66,9 @@ jobs:
         # has failed before on Namespace runners with "Operation not permitted".
         # Keep this as a defensive check: load the module, materialize any
         # missing minor nodes, and fail loudly if losetup still cannot attach.
+        # The attach probe runs under sudo because LOOP_SET_FD needs
+        # CAP_SYS_ADMIN; pmbootstrap itself sudo-calls losetup, so a probe that
+        # succeeds only under sudo matches the real install path.
         run: |
           sudo modprobe loop 2>/dev/null || true
           for i in $(seq 0 7); do
@@ -73,18 +76,18 @@ jobs:
           done
           losetup -f || true
           echo "loop devices:"; losetup -l
-          # Prove losetup can actually attach, not just that nodes exist. This
-          # catches the Namespace-style "node exists but ioctl denied" failure
-          # before we burn 30+ minutes on the kernel build.
+          # Prove losetup can actually attach under sudo, not just that nodes
+          # exist. This catches the Namespace-style "node exists but ioctl
+          # denied" failure before we burn 30+ minutes on the kernel build.
           t=$(mktemp)
           truncate -s 1M "$t"
-          loop=$(losetup -f --show -P "$t") || {
-            echo "ERROR: losetup cannot attach a test file."
+          loop=$(sudo losetup -f --show -P "$t") || {
+            echo "ERROR: sudo losetup cannot attach a test file."
             echo "This runner is unsuitable for pmbootstrap install."
             rm -f "$t"
             exit 1
           }
-          losetup -d "$loop"
+          sudo losetup -d "$loop"
           rm -f "$t"
 
       - name: Clone pinned pmbootstrap and pmaports

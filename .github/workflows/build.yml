@@ -61,6 +61,18 @@ jobs:
           test "$(grep -cv '^#' config/boards.conf)" -eq 19
           test "$(grep -c '.dtb$' config/openstick-dtbs.list)" -eq 14
 
+      - name: Ensure loop devices are available
+        # Namespace's managed Ubuntu image occasionally ships without /dev/loop*
+        # nodes materialized, which makes pmbootstrap's losetup fail with
+        # "device node /dev/loop0 is lost". Load the module and create the nodes.
+        run: |
+          sudo modprobe loop 2>/dev/null || true
+          for i in $(seq 0 7); do
+            [ -b /dev/loop$i ] || sudo mknod -m 660 /dev/loop$i b 7 $i
+          done
+          losetup -f || true
+          echo "loop devices:"; losetup -l
+
       - name: Clone pinned pmbootstrap and pmaports
         run: |
           git clone https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git "$HOME/pmbootstrap"

@@ -1,7 +1,7 @@
 MSM8916 postmarketOS multi-board image
 ======================================
 
-The default device tree is msm8916-thwc-ufi001c.dtb.
+The default device tree is msm8916-thwc-ufi003.dtb.
 
 To select another board, edit /boot/extlinux/extlinux.conf in the installed
 system (or /extlinux/extlinux.conf when this boot image is mounted on a host)

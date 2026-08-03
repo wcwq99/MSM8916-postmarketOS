@@ -40,7 +40,7 @@ LED、按键、屏幕或充电功能验证。
 
 ## 支持的板型
 
-默认选择 `thwc-ufi001c`。完整映射也会写入 boot 镜像根目录的
+默认选择 `thwc-ufi003`。完整映射也会写入 boot 镜像根目录的
 `/boards.conf`，并随发布包保存为 `boards.conf`。
 
 | 板型 ID | DTB | 来源 |
@@ -75,7 +75,7 @@ workflow** 手动触发完整构建，runner 固定为 `ubuntu-24.04`（原因�
 1. 检出所有固定 submodule；
 2. 为 pmaports 内核包加入 19 款 DTB 并从源码重建内核；
 3. 生成带 ModemManager/QMI/QRTR 的 console postmarketOS split 镜像；
-4. 把 extlinux 默认 `fdt` 改为 `/dtbs/qcom/msm8916-thwc-ufi001c.dtb`；
+4. 把 extlinux 默认 `fdt` 改为 `/dtbs/qcom/msm8916-thwc-ufi003.dtb`；
 5. 检查 boot 镜像内 19 个 DTB 的 `compatible`，生成 `SHA256SUMS`；
 6. 同时上传 Actions Artifact，并创建预发布 GitHub Release。
 

@@ -69,6 +69,49 @@ if defined MISSING (
     goto :abort
 )
 
+REM Verify artifact integrity against SHA256SUMS. Bootloader images with
+REM silent corruption will hard-brick the device, so refuse to flash if the
+REM checksum file is missing or any hash mismatches. certutil outputs the
+REM hash in upper-case hex; SHA256SUMS uses lower-case, so compare case-
+REM insensitively.
+if not exist "%SCRIPT_DIR%\SHA256SUMS" (
+    echo ERROR: SHA256SUMS not found next to this script.
+    echo Refusing to flash without integrity verification.
+    goto :abort
+)
+echo Verifying artifact checksums against SHA256SUMS...
+set "CHECKSUM_FAIL="
+for /f "usebackq tokens=1,2 delims= " %%h in (`type "%SCRIPT_DIR%\SHA256SUMS" ^| findstr /V "^#"`) do (
+    set "EXPECTED=%%h"
+    set "FILE=%%i"
+    REM Strip leading "./" from the path stored in SHA256SUMS.
+    set "FILE=!FILE:~2!"
+    set "FULL=%SCRIPT_DIR%\!FILE!"
+    if not exist "!FULL!" (
+        echo   MISSING: !FILE!
+        set "CHECKSUM_FAIL=1"
+    ) else (
+        set "ACTUAL="
+        for /f "tokens=2 delims=:" %%a in ('certutil -hashfile "!FULL!" SHA256 2^>nul ^| findstr /R "^[0-9A-Fa-f]"') do (
+            set "ACTUAL=%%a"
+        )
+        REM certutil prints hash with a leading space; strip it.
+        set "ACTUAL=!ACTUAL: =!"
+        if /i not "!ACTUAL!"=="!EXPECTED!" (
+            echo   MISMATCH: !FILE!
+            echo     expected: !EXPECTED!
+            echo     actual:   !ACTUAL!
+            set "CHECKSUM_FAIL=1"
+        )
+    )
+)
+if defined CHECKSUM_FAIL (
+    echo ERROR: Artifact checksum verification failed.
+    echo Refusing to flash corrupted or tampered images.
+    goto :abort
+)
+echo   all checksums verified
+
 echo.
 echo ============================================================
 echo  MSM8916 postmarketOS Fastboot Flasher
@@ -174,6 +217,21 @@ goto :wait_device
 :device_ready
 echo   device detected:
 "%FASTBOOT%" devices
+REM Capture the first fastboot device serial so all subsequent commands
+REM target it explicitly. Prevents flashing the wrong device when several
+REM are connected. "fastboot devices" prints "<serial>\\tfastboot".
+set "DEVICE_SERIAL="
+for /f "tokens=1 delims= " %%s in ('"%FASTBOOT%" devices 2^>nul ^| findstr /R "fastboot$"') do (
+    if not defined DEVICE_SERIAL set "DEVICE_SERIAL=%%s"
+)
+if not defined DEVICE_SERIAL (
+    echo ERROR: could not parse fastboot device serial.
+    goto :abort
+)
+REM Keep FASTBOOT (quoted path) and -s serial as separate tokens so the
+REM quoted path stays parseable when FASTBOOT contains spaces.
+set "FB_SERIAL=-s !DEVICE_SERIAL!"
+echo   using serial: !DEVICE_SERIAL!
 
 REM Boot partition on MSM8916 lk1st is always "boot" (non-A/B device).
 set "BOOT_PART=boot"
@@ -181,14 +239,16 @@ REM Userdata holds the btrfs root image; cache is wiped separately by -w.
 set "ROOT_TARGET=userdata"
 
 REM ---- On A/B devices, mark the just-flashed slot active so we boot from it.
-REM lk1st reports current-slot as "_a"/"_b" (with underscore) or "a"/"b".
-REM Strip any non-alphanumeric chars before passing back to --set-active.
+REM fastboot getvar current-slot prints multiple lines (current-slot: a,
+REM OKAY [0.001s], finished. total time: ...). Filter to the current-slot
+REM line only, otherwise the loop captures "total" from the last line.
 set "ACTIVE_SLOT="
-for /f "tokens=2 delims= " %%a in ('"%FASTBOOT%" getvar current-slot 2^>nul') do (
+for /f "tokens=2 delims=:" %%a in ('"%FASTBOOT%" !FB_SERIAL! getvar current-slot 2^>nul ^| findstr /R /C:"^current-slot:"') do (
     set "RAW_SLOT=%%a"
 )
 if defined RAW_SLOT (
     set "ACTIVE_SLOT=!RAW_SLOT!"
+    REM Strip leading space and any CR.
     set "ACTIVE_SLOT=!ACTIVE_SLOT: =!"
 )
 
@@ -199,13 +259,13 @@ if "!FLASH_BOOTLOADER!"=="1" (
     echo ============================================================
     REM Order matters: hyp and tz are a matched pair from DragonBoard
    REM 410c linux bootloader bundle. Flash them together, never mix with stock.
-    "%FASTBOOT%" flash hyp "%BL_DIR%\hyp.mbn"
+    "%FASTBOOT%" !FB_SERIAL! flash hyp "%BL_DIR%\hyp.mbn"
     if !errorlevel! neq 0 goto :flash_failed
-    "%FASTBOOT%" flash tz "%BL_DIR%\tz.mbn"
+    "%FASTBOOT%" !FB_SERIAL! flash tz "%BL_DIR%\tz.mbn"
     if !errorlevel! neq 0 goto :flash_failed
     REM aboot/lk1st goes to the aboot partition on MSM8916; some lk1st builds
     REM also expose it as "sbl1" -- keep aboot as the canonical name.
-    "%FASTBOOT%" flash aboot "!ABOOT_FILE!"
+    "%FASTBOOT%" !FB_SERIAL! flash aboot "!ABOOT_FILE!"
     if !errorlevel! neq 0 goto :flash_failed
     echo   bootloader flashed: hyp, tz, !ABOOT_FILE!
 ) else (
@@ -218,7 +278,7 @@ if "!FLASH_BOOT!"=="1" (
     echo ============================================================
     echo  Step 3/4: Flashing boot image
     echo ============================================================
-    "%FASTBOOT%" flash !BOOT_PART! "%EXPORT_DIR%\zhihe-generic-boot.img"
+    "%FASTBOOT%" !FB_SERIAL! flash !BOOT_PART! "%EXPORT_DIR%\zhihe-generic-boot.img"
     if !errorlevel! neq 0 goto :flash_failed
     echo   boot flashed to !BOOT_PART!
 ) else (
@@ -238,10 +298,10 @@ if "!FLASH_ROOT!"=="1" (
     REM the destination; userdata is safest because it is never needed for boot.
     echo   target partition: !ROOT_TARGET!
     echo   ^(if userdata flash fails, try "system" manually after this script^)
-    "%FASTBOOT%" flash !ROOT_TARGET! "%EXPORT_DIR%\zhihe-generic-root.img"
+    "%FASTBOOT%" !FB_SERIAL! flash !ROOT_TARGET! "%EXPORT_DIR%\zhihe-generic-root.img"
     if !errorlevel! neq 0 (
         echo   raw flash returned !errorlevel!, retrying with -S 256M auto-split...
-        "%FASTBOOT%" flash -S 256M !ROOT_TARGET! "%EXPORT_DIR%\zhihe-generic-root.img"
+        "%FASTBOOT%" !FB_SERIAL! flash -S 256M !ROOT_TARGET! "%EXPORT_DIR%\zhihe-generic-root.img"
         if !errorlevel! neq 0 goto :flash_failed
     )
     echo   root flashed to !ROOT_TARGET!
@@ -253,29 +313,33 @@ if "!FLASH_ROOT!"=="1" (
 REM ---- On A/B devices, mark the just-flashed slot active so we boot from it -
 if defined ACTIVE_SLOT (
     if not "!ACTIVE_SLOT!"=="" (
-        "%FASTBOOT%" --set-active="!ACTIVE_SLOT!" 2>nul
+        "%FASTBOOT%" !FB_SERIAL! --set-active="!ACTIVE_SLOT!" 2>nul
     )
 )
 
 echo.
 echo ============================================================
-echo  Wiping cache and userdata ^(as appropriate^)
+echo  Wiping cache ^(and userdata for full flash only^)
 echo ============================================================
-REM Conditional wipe to avoid clobbering the rootfs we just wrote:
-REM  - If we flashed root to userdata, only erase cache.
-REM  - Otherwise, erase both userdata and cache to clear stale Android data.
-"%FASTBOOT%" erase cache 2>nul
-if "!FLASH_ROOT!"=="1" (
-    echo   userdata skipped ^(just flashed with root image^)
-) else (
-    "%FASTBOOT%" erase userdata 2>nul
-)
+REM Erase logic per scope, to avoid clobbering an existing postmarketOS
+REM rootfs that lives on userdata:
+REM  - scope 1 (full flash): erase both userdata and cache, because we just
+REM    overwrote userdata with the new root image and want a clean state.
+REM    Actually we flashed root to userdata, so do NOT erase it -- the just
+REM    written image IS the userdata content. Wipe cache only.
+REM  - scope 2 (boot+root): same as scope 1, cache only.
+REM  - scope 3 (boot only): preserve existing rootfs on userdata, cache only.
+REM In short: never erase userdata here. We just flashed root to it (scope
+REM 1/2) or want to keep the existing one (scope 3). Erasing would either
+REM destroy the freshly written image or the user's installed system.
+"%FASTBOOT%" !FB_SERIAL! erase cache 2>nul
+echo   userdata preserved
 
 echo.
 echo ============================================================
 echo  Rebooting device
 echo ============================================================
-"%FASTBOOT%" reboot
+"%FASTBOOT%" !FB_SERIAL! reboot
 
 echo.
 echo ============================================================

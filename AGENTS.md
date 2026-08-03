@@ -119,12 +119,19 @@ GitHub Release asset.
 - Keep one `zhihe-generic-boot.img` and one `zhihe-generic-root.img`; do not
   duplicate the rootfs per board.
 - Default extlinux to
-  `/dtbs/qcom/msm8916-thwc-ufi001c.dtb`, an upstream-supported baseline.
+  `/dtbs/qcom/msm8916-thwc-ufi003.dtb`, an upstream-supported baseline.
 - Preserve `boards.conf` and `README-BOARD-SELECTION.txt` in the boot image.
 - The tarball must include 19 exported DTBs, source revision metadata, and
   checksums for every file.
 - Releases remain prereleases until physical-device boot results justify a
   stable release. Never publish passwords, tokens, firmware backups, IMEI/NV
   data, or user-provided proprietary partitions.
-- Do not automate flashing. Documentation must retain the EDL backup and
-  `tz`/`hyp` mismatch warnings.
+- `scripts/flash-fastboot.bat` is an owner-authorized exception to the
+  earlier "Do not automate flashing" rule. It is a one-click fastboot flasher
+  for the multi-board release tarball, but it MUST keep:
+  - EDL backup warning before any write
+  - `tz`/`hyp` mismatch warning before bootloader flash
+  - interactive `YES` confirmation before flashing hyp/tz/aboot
+  - SHA256SUMS verification of all artifacts before flashing
+  Any change that removes these guards violates the exception and must be
+  reverted.

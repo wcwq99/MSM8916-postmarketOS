@@ -75,7 +75,7 @@ jobs:
             [ -b /dev/loop$i ] || sudo mknod -m 660 /dev/loop$i b 7 $i
           done
           losetup -f || true
-          echo "loop devices:"; losetup -l
+          echo "loop devices:"; losetup -l || true
           # Prove losetup can actually attach under sudo, not just that nodes
           # exist. This catches the Namespace-style "node exists but ioctl
           # denied" failure before we burn 30+ minutes on the kernel build.
@@ -156,8 +156,22 @@ jobs:
           pmbootstrap config extra_packages
 
       - name: Checksum and build the patched kernel package
+        # abuild fetches the pinned kernel tarball from github.com inside the
+        # chroot via busybox wget, which does not retry. A transient DNS failure
+        # on codeload.github.com has killed a CI run before. Mirror the 3-attempt
+        # retry loop from scripts/build-local.sh.
         run: |
-          pmbootstrap checksum linux-postmarketos-qcom-msm8916
+          for attempt in 1 2 3; do
+            if pmbootstrap checksum linux-postmarketos-qcom-msm8916; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "ERROR: kernel source fetch failed after 3 attempts"
+              exit 1
+            fi
+            echo "Source fetch failed (attempt $attempt/3), retrying in 30s" >&2
+            sleep 30
+          done
           pmbootstrap build --arch aarch64 --force linux-postmarketos-qcom-msm8916
 
       - name: Build split postmarketOS image
@@ -173,116 +187,17 @@ jobs:
           fi
 
       - name: Switch to CN mirrors and install USB NCM+RNDIS gadget
-        # All writes target $ROOTFS, which pmbootstrap created under sudo, so
-        # every file there is root-owned. Use sudo tee / sudo install for all
-        # writes; plain "cat >" fails with "Permission denied" on the runner
-        # user.
+        # Delegate to scripts/post-install-customize.sh so the CI image and
+        # scripts/build-local.sh stay in sync (AGENTS.md requires the two to
+        # mirror each other). The script writes rootfs files under sudo
+        # because pmbootstrap creates the chroot root-owned.
         run: |
-          ROOTFS="$PMB_WORK/chroot_rootfs_zhihe-generic"
-          test -d "$ROOTFS" || { echo "rootfs chroot missing: $ROOTFS"; exit 1; }
-
-          # 1) Replace apk repositories with TUNA mirrors (Alpine edge + pmOS)
-          sudo tee "$ROOTFS/etc/apk/repositories" > /dev/null <<'REPOS'
-          https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/main
-          https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/community
-          https://mirrors.tuna.tsinghua.edu.cn/postmarketOS/master
-          REPOS
-          sudo sed -i 's/^          //' "$ROOTFS/etc/apk/repositories"
-
-          # 2) Networking deps (dnsmasq, iptables, iproute2) are installed via
-          #    extra_packages above during pmbootstrap install, so no extra apk
-          #    call here that could desync the chroot state.
-
-          # 3) Gadget setup script: builds a composite NCM+RNDIS gadget via configfs.
-          #    Pattern verified in kinsamanka/OpenStick-Builder setup_ncm_gadget.sh,
-          #    extended here to expose both ncm.1 and rndis.0 functions so the host
-          #    can use whichever the OS prefers (Win/macOS -> RNDIS, Linux -> NCM).
-          sudo tee "$ROOTFS/usr/local/bin/setup_usb_gadget.sh" > /dev/null <<'GADGET'
-          #!/bin/sh -e
-          CONFIGFS=/sys/kernel/config/usb_gadget
-          NAME=openstick
-          DIR=$CONFIGFS/$NAME
-          [ -d "$CONFIGFS" ] || { echo "configfs missing"; exit 0; }
-          [ -d "$DIR" ] && exit 0
-          mkdir -p "$DIR/functions/ncm.1" "$DIR/functions/rndis.0"
-          echo 0x0200  > "$DIR/bcdUSB"
-          echo 0x1d6b  > "$DIR/idVendor"   # Linux Foundation
-          echo 0x0104  > "$DIR/idProduct"  # Multifunction Composite Gadget
-          echo 0x40    > "$DIR/bMaxPacketSize0"
-          mkdir -p "$DIR/strings/0x409"
-          echo "4G LTE Dongle" > "$DIR/strings/0x409/product"
-          echo "Openstick"    > "$DIR/strings/0x409/manufacturer"
-          echo "0123456789"   > "$DIR/strings/0x409/serialnumber"
-          # RNDIS uses a different interface class so Windows auto-binds usbnet/rndis
-          echo 0xef > "$DIR/functions/rndis.0/bInterfaceClass"
-          mkdir -p "$DIR/configs/c.1"
-          echo 0x80 > "$DIR/configs/c.1/bmAttributes"
-          echo 250  > "$DIR/configs/c.1/MaxPower"
-          ln -sf "$DIR/functions/ncm.1"    "$DIR/configs/c.1"
-          ln -sf "$DIR/functions/rndis.0" "$DIR/configs/c.1"
-          # OS descriptors so Windows loads RNDIS drivers automatically
-          echo "MSFT100" > "$DIR/os_desc/qw_sign"
-          echo 0xbc     > "$DIR/os_desc/b_vendor_code"
-          echo 1        > "$DIR/os_desc/use"
-          ln -sf "$DIR/configs/c.1" "$DIR/os_desc"
-          echo "$(ls /sys/class/udc | head -1)" > "$DIR/UDC"
-          GADGET
-          sudo chmod +x "$ROOTFS/usr/local/bin/setup_usb_gadget.sh"
-
-          # 4) OpenRC service that brings the gadget up and assigns IPv4+IPv6.
-          #    Device side: 10.0.0.1/24 + fc00::1/64; host gets .2/fc00::2 via DHCP.
-          sudo tee "$ROOTFS/etc/init.d/usb-gadget" > /dev/null <<'SVC'
-          #!/sbin/openrc-run
-          description="USB NCM+RNDIS gadget networking"
-          depend() { after modules localmount; need dev-settle; }
-          start() {
-            ebegin "Setting up USB gadget"
-            modprobe libcomposite 2>/dev/null || true
-            /usr/local/bin/setup_usb_gadget.sh
-            # Wait for the usb0 interface to appear
-            for i in $(seq 1 30); do
-              ip link show usb0 >/dev/null 2>&1 && break
-              sleep 1
-            done
-            ip link set usb0 up
-            ip addr add 10.0.0.1/24 dev usb0 2>/dev/null || true
-            ip -6 addr add fc00::1/64 dev usb0 2>/dev/null || true
-            # DHCPv4 + DHCPv6 via dnsmasq on the USB link
-            pkill dnsmasq 2>/dev/null || true
-            dnsmasq --interface=usb0 --bind-interfaces --no-resolv \
-              --dhcp-range=10.0.0.2,10.0.0.6,255.255.255.0,12h \
-              --dhcp-range=fc00::2,fc00::6,64,12h \
-              --dhcp-option=option:router,10.0.0.1 \
-              --dhcp-option=option:dns-server,10.0.0.1,223.5.5.5,2400:3200::1
-            eend 0
-          }
-          stop() { pkill dnsmasq 2>/dev/null || true; eend 0; }
-          SVC
-          sudo chmod +x "$ROOTFS/etc/init.d/usb-gadget"
-
-          # 5) udev: fire the gadget setup as soon as the UDC appears at boot
-          sudo mkdir -p "$ROOTFS/etc/udev/rules.d"
-          sudo tee "$ROOTFS/etc/udev/rules.d/10-udc.rules" > /dev/null <<'UDEV'
-          ACTION=="add", SUBSYSTEM=="udc", RUN+="/sbin/modprobe libcomposite", RUN+="/usr/local/bin/setup_usb_gadget.sh"
-          SUBSYSTEM=="net", ACTION=="add|change|move", ENV{DEVTYPE}=="gadget", ENV{NM_UNMANAGED}="0"
-          UDEV
-
-          # 6) Enable service at boot (symlink equivalent of rc-update add) + forwarding
-          sudo mkdir -p "$ROOTFS/etc/runlevels/default"
-          sudo ln -sf /etc/init.d/usb-gadget "$ROOTFS/etc/runlevels/default/usb-gadget"
-          sudo tee -a "$ROOTFS/etc/sysctl.conf" > /dev/null <<'SYSCTL'
-          net.ipv4.ip_forward=1
-          net.ipv6.conf.all.forwarding=1
-          SYSCTL
-
-          # 7) Belt-and-suspenders: flip chroot copy of extlinux to UFI003 too
-          if [ -f "$ROOTFS/boot/extlinux/extlinux.conf" ]; then
-            sudo sed -i 's#^[[:space:]]*fdt .*#\tfdt /dtbs/qcom/msm8916-thwc-ufi003.dtb#' \
-              "$ROOTFS/boot/extlinux/extlinux.conf"
-          fi
-
-          # Finally export the prepared image
-          pmbootstrap export
+          scripts/post-install-customize.sh "$PMB_WORK/chroot_rootfs_zhihe-generic"
+          # Export the prepared image. pmbootstrap export with no argument
+          # writes symlinks into CWD ($GITHUB_WORKSPACE), not $PMB_EXPORT --
+          # pass the path explicitly so the Collect step's find "$PMB_EXPORT"
+          # resolves the same files.
+          pmbootstrap export "$PMB_EXPORT"
 
       - name: Upload pmbootstrap failure log
         # Not failure(): a job killed by the timeout is "cancelled", and this
@@ -354,7 +269,7 @@ jobs:
           body: |
             One split postmarketOS image containing all 19 supported MSM8916 DTBs.
 
-            The default is `msm8916-thwc-ufi001c.dtb`. Mount the boot image and edit
+            The default is `msm8916-thwc-ufi003.dtb`. Mount the boot image and edit
             `/extlinux/extlinux.conf`, or edit `/boot/extlinux/extlinux.conf` after
             installation, to select another file listed in `boards.conf`.
 

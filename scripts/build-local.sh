@@ -184,7 +184,7 @@ write_config() {
 		build_pkgs_on_install = True
 		ccache_size = 5G
 		device = zhihe-generic
-		extra_packages = soc-qcom-msm8916-rproc,qmi-utils,qrtr,modemmanager,iw,wpa_supplicant,wireless-regdb
+		extra_packages = soc-qcom-msm8916-rproc,qmi-utils,qrtr,modemmanager,iw,wpa_supplicant,wireless-regdb,dnsmasq,iptables,iproute2
 		hostname = msm8916-pmos
 		is_default_channel = False
 		jobs = ${JOBS:-$(nproc)}
@@ -235,6 +235,11 @@ build_image() {
 		dump_log "pmbootstrap install"
 		exit 1
 	fi
+	# Apply CN mirrors + USB NCM/RNDIS gadget + UFI003 default DTB before
+	# exporting, mirroring .github/workflows/build.yml. Shared script keeps
+	# the two paths in sync (AGENTS.md requires it).
+	"$repo_root/scripts/post-install-customize.sh" \
+		"$PMB_WORK/chroot_rootfs_zhihe-generic"
 	# Drop symlinks left by an earlier run: the state directory is reused, so a
 	# stale-but-resolvable link would be collected as if it were fresh output.
 	rm -rf "$PMB_EXPORT"
